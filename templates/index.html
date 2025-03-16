@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>URL请求转发工具</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+            color: #333;
+        }
+        
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+        
+        h1 {
+            color: #2196f3;
+            margin-bottom: 20px;
+            text-align: center;
+        }
+        
+        .status-bar {
+            display: flex;
+            align-items: center;
+            margin-bottom: 20px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+        
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 10px;
+        }
+        
+        .connected {
+            background-color: #4caf50;
+        }
+        
+        .disconnected {
+            background-color: #f44336;
+        }
+        
+        .input-group {
+            margin-bottom: 20px;
+        }
+        
+        input[type="text"] {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            box-sizing: border-box;
+        }
+        
+        button {
+            background-color: #2196f3;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background-color 0.3s;
+        }
+        
+        button:hover {
+            background-color: #1976d2;
+        }
+        
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+        
+        .result {
+            margin-top: 20px;
+            padding: 15px;
+            border-radius: 4px;
+        }
+        
+        .success {
+            background-color: #e8f5e9;
+            color: #2e7d32;
+        }
+        
+        .error {
+            background-color: #ffebee;
+            color: #c62828;
+        }
+    </style>
+    <script src="./static/eruda.js"></script>
+    <script>
+        eruda.init();
+    </script>
+</head>
+
+<body>
+    <div class="container">
+        <h1>URL请求转发工具</h1>
+
+        <div class="status-bar">
+            <div id="statusIndicator" class="status-indicator disconnected"></div>
+            <span id="statusText">未连接</span>
+            <span id="clientId" style="margin-left: 20px; font-family: monospace"></span>
+        </div>
+
+        <div class="input-group">
+            <input type="text" id="urlInput" placeholder="请输入要请求的URL" />
+            <button id="fetchButton" onclick="fetchUrl()" disabled>获取内容</button>
+        </div>
+
+        <div id="result" class="result" style="display: none"></div>
+    </div>
+
+    <script src="./static/socket.io.js"></script>
+    <script>
+        let socket;
+        let isConnected = false;
+
+        function connect() {
+            socket = io(window.location.origin);
+
+            socket.on("connect", () => {
+                isConnected = true;
+                updateConnectionStatus(true);
+            });
+
+            socket.on("client_id", (data) => {
+                document.getElementById(
+                    "clientId"
+                ).textContent = `客户端ID: ${data.client_id}`;
+            });
+
+            socket.on("disconnect", () => {
+                isConnected = false;
+                updateConnectionStatus(false);
+            });
+
+            socket.on("connect_error", (error) => {
+                console.error("Connection error:", error);
+                updateConnectionStatus(false);
+            });
+
+            socket.on("fetch_url_request", (data) => {
+                console.log("Received URL fetch request:", data);
+                const url = data.url;
+
+                // 使用XHR获取URL内容
+                const xhr = new XMLHttpRequest();
+                xhr.open('GET', url, true);
+                xhr.responseType = 'arraybuffer';
+
+                xhr.onload = function() {
+                    if (xhr.status >= 200 && xhr.status < 300) {
+                        // 获取文件内容的二进制数据
+                        const fileContent = xhr.response;
+
+                        // 获取文件名
+                        let filename = '';
+                        const contentDisposition = xhr.getResponseHeader('content-disposition');
+                        if (contentDisposition && contentDisposition.includes('filename=')) {
+                            const filenameMatch = contentDisposition.match(/filename=([^;]+)/);
+                            if (filenameMatch) {
+                                filename = filenameMatch[1].replace(/["']/g, '');
+                            }
+                        }
+
+                        if (!filename) {
+                            // 从URL中提取文件名
+                            const urlObj = new URL(url);
+                            filename = urlObj.pathname.split('/').pop() || 'downloaded_file';
+                        }
+
+                        // 将文件内容发送到后端保存
+                        const formData = new FormData();
+                        formData.append('file', new Blob([fileContent]), filename);
+                        formData.append('url', url);
+
+                        // 使用XHR发送到后端
+                        const postXhr = new XMLHttpRequest();
+                        postXhr.open('POST', `${window.location.origin}/fetch-url`, true);
+
+                        postXhr.onload = function() {
+                            if (postXhr.status >= 200 && postXhr.status < 300) {
+                                const data = JSON.parse(postXhr.responseText);
+                                showResult(`请求成功：${data.message}`, true);
+
+                                // 向服务器发送成功结果
+                                socket.emit("url_fetch_result", {
+                                    success: true,
+                                    url: url,
+                                    filename: data.filename
+                                });
+                            } else {
+                                let errorMsg = '保存文件失败';
+                                try {
+                                    const data = JSON.parse(postXhr.responseText);
+                                    if (data.error) errorMsg = data.error;
+                                } catch (e) {}
+
+                                showResult(`请求失败：${errorMsg}`, false);
+
+                                // 向服务器发送失败结果
+                                socket.emit("url_fetch_result", {
+                                    success: false,
+                                    url: url,
+                                    error: errorMsg
+                                });
+                            }
+                        };
+
+                        postXhr.onerror = function(event) {
+                            try {
+                                // 记录详细错误信息
+                                console.error('发送请求到服务器失败 - 详细信息:', {
+                                    event: event,
+                                    target: event.target,
+                                    type: event.type,
+                                    status: postXhr.status,
+                                    statusText: postXhr.statusText,
+                                    readyState: postXhr.readyState,
+                                    responseURL: postXhr.responseURL || url,
+                                    error: event.error || '未知错误'
+                                });
+
+                                const errorMsg = '发送请求到服务器失败';
+                                showResult(errorMsg, false);
+
+                                // 向服务器发送失败结果
+                                socket.emit("url_fetch_result", {
+                                    success: false,
+                                    url: url,
+                                    error: errorMsg
+                                });
+                            } catch (e) {
+                                console.error('处理XHR错误时发生异常:', e);
+                            }
+                        };
+
+                        postXhr.send(formData);
+                    } else {
+                        const errorMsg = `获取URL内容失败: ${xhr.status} ${xhr.statusText}`;
+                        showResult(errorMsg, false);
+
+                        // 向服务器发送失败结果
+                        socket.emit("url_fetch_result", {
+                            success: false,
+                            url: url,
+                            error: errorMsg
+                        });
+                    }
+                };
+
+                xhr.onerror = function(event) {
+                    try {
+                        // 记录详细错误信息
+                        console.error('网络请求失败 - 详细信息:', {
+                            event: event,
+                            target: event.target,
+                            type: event.type,
+                            status: xhr.status,
+                            statusText: xhr.statusText,
+                            readyState: xhr.readyState,
+                            responseURL: xhr.responseURL || url,
+                            error: event.error || '未知错误'
+                        });
+
+                        const errorMsg = '网络请求失败';
+                        showResult(errorMsg, false);
+
+                        // 向服务器发送失败结果
+                        socket.emit("url_fetch_result", {
+                            success: false,
+                            url: url,
+                            error: errorMsg
+                        });
+                    } catch (e) {
+                        console.error('处理XHR错误时发生异常:', e);
+                    }
+                };
+
+                xhr.send();
+            });
+        }
+
+        function updateConnectionStatus(connected) {
+            const indicator = document.getElementById("statusIndicator");
+            const statusText = document.getElementById("statusText");
+            const fetchButton = document.getElementById("fetchButton");
+
+            if (connected) {
+                indicator.className = "status-indicator connected";
+                statusText.textContent = "已连接";
+                fetchButton.disabled = false;
+            } else {
+                indicator.className = "status-indicator disconnected";
+                statusText.textContent = "未连接";
+                fetchButton.disabled = true;
+            }
+        }
+
+        function fetchUrl() {
+            const urlInput = document.getElementById("urlInput");
+            const resultDiv = document.getElementById("result");
+            const url = urlInput.value.trim();
+
+            if (!url) {
+                showResult("请输入有效的URL", false);
+                return;
+            }
+
+            // 使用XHR获取URL内容
+            const xhr = new XMLHttpRequest();
+            xhr.open('GET', url, true);
+            xhr.responseType = 'arraybuffer';
+
+            xhr.onload = function() {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    // 获取文件内容的二进制数据
+                    const fileContent = xhr.response;
+
+                    // 获取文件名
+                    let filename = '';
+                    const contentDisposition = xhr.getResponseHeader('content-disposition');
+                    if (contentDisposition && contentDisposition.includes('filename=')) {
+                        const filenameMatch = contentDisposition.match(/filename=([^;]+)/);
+                        if (filenameMatch) {
+                            filename = filenameMatch[1].replace(/["']/g, '');
+                        }
+                    }
+
+                    if (!filename) {
+                        // 从URL中提取文件名
+                        const urlObj = new URL(url);
+                        filename = urlObj.pathname.split('/').pop() || 'downloaded_file';
+                    }
+
+                    // 将文件内容发送到后端保存
+                    const formData = new FormData();
+                    formData.append('file', new Blob([fileContent]), filename);
+                    formData.append('url', url);
+
+                    // 使用XHR发送到后端
+                    const postXhr = new XMLHttpRequest();
+                    postXhr.open('POST', `${window.location.origin}/fetch-url`, true);
+
+                    postXhr.onload = function() {
+                        if (postXhr.status >= 200 && postXhr.status < 300) {
+                            const data = JSON.parse(postXhr.responseText);
+                            showResult(`请求成功：${data.message}`, true);
+                        } else {
+                            let errorMsg = '请求失败';
+                            try {
+                                const data = JSON.parse(postXhr.responseText);
+                                if (data.error) errorMsg = data.error;
+                            } catch (e) {}
+
+                            showResult(`请求失败：${errorMsg}`, false);
+                        }
+                    };
+
+                    postXhr.onerror = function() {
+                        showResult('发送请求到服务器失败', false);
+                    };
+
+                    postXhr.send(formData);
+                } else {
+                    showResult(`获取URL内容失败: ${xhr.status} ${xhr.statusText}`, false);
+                }
+            };
+
+            xhr.onerror = function(event) {
+                try {
+                    // 记录详细错误信息
+                    console.error('网络请求失败 - 详细信息:', {
+                        event: event,
+                        target: event.target,
+                        type: event.type,
+                        status: xhr.status,
+                        statusText: xhr.statusText,
+                        readyState: xhr.readyState,
+                        responseURL: xhr.responseURL || url,
+                        error: event.error || '未知错误'
+                    });
+
+                    showResult('网络请求失败', false);
+                } catch (e) {
+                    console.error('处理XHR错误时发生异常:', e);
+                }
+            };
+
+            xhr.send();
+        }
+
+        function showResult(message, isSuccess) {
+            const resultDiv = document.getElementById("result");
+            resultDiv.textContent = message;
+            resultDiv.className = `result ${isSuccess ? "success" : "error"}`;
+            resultDiv.style.display = "block";
+        }
+
+        // 页面加载完成后自动连接
+        window.addEventListener("load", connect);
+    </script>
+</body>
+
+</html>
